@@ -8,11 +8,13 @@
  * General Public License version 2 as published by the Free Software
  * Foundation.
  *----------------------------------------------------------------------*/
-#include <kernel/paging.h>
-#include <kernel/vmm.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <kernel/paging.h>
+#include <kernel/vmm.h>
 #include <kernel/panic.h>
+#include <kernel/compiler.h>
+#include <kernel/process.h>
 _Bool isInitialized = false;
 _Bool is_spawning = 0;
 vmm_entry_t *old_entries = NULL;
@@ -68,9 +70,10 @@ void vmm_start_address_bookeeping(uintptr_t framebuffer_address, uintptr_t heap)
 	areas[2].rwx = VMM_WRITE | VMM_GLOBAL | VMM_NOEXEC; /* RW- */
 	areas[2].type = VMM_TYPE_REGULAR;
 }
-
 void *vmm_map_range(void *range, size_t pages, uint64_t flags)
 {
+	if(likely(current_process))
+		acquire_spinlock(&current_process->vm_spl);
 	uintptr_t mem = (uintptr_t) range;
 	for (size_t pgs = 0; pgs < pages; pgs++)
 	{
@@ -79,10 +82,14 @@ void *vmm_map_range(void *range, size_t pages, uint64_t flags)
 		mem += 0x1000;
 	}
 	memset(range, 0, 4096 * pages);
+	if(likely(current_process))
+		release_spinlock(&current_process->vm_spl);
 	return range;
 }
 void vmm_unmap_range(void *range, size_t pages)
 {
+	if(likely(current_process))
+		acquire_spinlock(&current_process->vm_spl);
 	uintptr_t mem = (uintptr_t) range;
 	for (size_t i = 0; i < pages; i++)
 	{
@@ -90,11 +97,15 @@ void vmm_unmap_range(void *range, size_t pages)
 		asm volatile("invlpg %0"::"m"(mem));
 		mem += 0x1000;
 	}
+	if(likely(current_process))
+		release_spinlock(&current_process->vm_spl);
 }
 void vmm_destroy_mappings(void *range, size_t pages)
 {
 	if(!vmm_is_mapped(range))
 		return;
+	if(likely(current_process))
+		acquire_spinlock(&current_process->vm_spl);
 	for(size_t i = 0; i < num_areas; i++)
 	{
 		if(areas[i].base == (uintptr_t)range && areas[i].pages == pages)
@@ -116,20 +127,28 @@ void vmm_destroy_mappings(void *range, size_t pages)
 				areas[num_areas-1].base = (uintptr_t)range + pages * PAGE_SIZE;
 				areas[num_areas-1].pages = second_half_pages;
 				qsort(areas,num_areas,sizeof(vmm_entry_t),vmm_comp);
+				if(likely(current_process))
+					release_spinlock(&current_process->vm_spl);
 				return;
 			}
 			else
 			{
 				areas[i].pages -= pages;
+				if(likely(current_process))
+					release_spinlock(&current_process->vm_spl);
 				return;
 			}
 		}
 	}
 	areas = realloc(areas, sizeof(vmm_entry_t) * num_areas);
 	qsort(areas,num_areas,sizeof(vmm_entry_t),vmm_comp);
+	if(likely(current_process))
+		release_spinlock(&current_process->vm_spl);
 }
 void *vmm_allocate_virt_address(uint64_t flags, size_t pages, uint32_t type, uint64_t prot)
 {
+	if(likely(current_process))
+		acquire_spinlock(&current_process->vm_spl);
 	uintptr_t base_address = 0;
 	switch(type)
 	{
@@ -163,28 +182,37 @@ void *vmm_allocate_virt_address(uint64_t flags, size_t pages, uint32_t type, uin
 	num_areas++;
 	areas = realloc(areas, num_areas * sizeof(vmm_entry_t));
 	if(!areas)
-		panic("Severe OOM!");
+		abort();
 	areas[num_areas-1].base = best_address;
 	areas[num_areas-1].pages = pages;
 	areas[num_areas-1].type = type;
 	areas[num_areas-1].rwx = prot;
 	qsort(areas,num_areas,sizeof(vmm_entry_t),vmm_comp);
+	if(likely(current_process))
+		release_spinlock(&current_process->vm_spl);
 	return (void*)best_address;
 }
 void *vmm_reserve_address(void *addr, size_t pages, uint32_t type, uint64_t prot)
-{	
+{
+	if(likely(current_process))
+		acquire_spinlock(&current_process->vm_spl);
 	if(vmm_is_mapped(addr))
+	{
+		if(likely(current_process))
+			release_spinlock(&current_process->vm_spl);
 		return NULL;
+	}
 	num_areas++;
 	areas = realloc(areas, num_areas * sizeof(vmm_entry_t));
 	if(!areas)
-		panic("Severe OOM!");
-
+		abort();
 	areas[num_areas-1].base = (uintptr_t)addr;
 	areas[num_areas-1].pages = pages;
 	areas[num_areas-1].type = type;
 	areas[num_areas-1].rwx = prot;
 	qsort(areas,num_areas,sizeof(vmm_entry_t),vmm_comp);
+	if(likely(current_process))
+		release_spinlock(&current_process->vm_spl);
 	return addr;
 }
 vmm_entry_t *vmm_is_mapped(void *addr)
@@ -192,9 +220,13 @@ vmm_entry_t *vmm_is_mapped(void *addr)
 	for(size_t i = 0; i < num_areas; i++)
 	{
 		if(areas[i].base == (uintptr_t)addr)
+		{
 			return &areas[i];
+		}
 		if(areas[i].base + areas[i].pages * 4096 > (uintptr_t) addr && areas[i].base < (uintptr_t) addr)
+		{
 			return &areas[i];
+		}
 	}
 	return NULL;
 }
@@ -247,8 +279,12 @@ void vmm_stop_spawning()
 }
 void vmm_change_perms(void *range, size_t pages, int perms)
 {
+	if(likely(current_process))
+		acquire_spinlock(&current_process->vm_spl);
 	for(size_t i = 0; i < pages; i++)
 	{
 		paging_change_perms(range, perms);
 	}
+	if(likely(current_process))
+		release_spinlock(&current_process->vm_spl);
 }

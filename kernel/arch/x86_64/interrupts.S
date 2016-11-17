@@ -53,6 +53,8 @@ isr%1:
 	jmp isr_common ;Go to the handler
 %endmacro
 extern irq_handler
+extern handle_signal
+extern current_process
 irq_common:
 	mov ax, ds
 	push rax
@@ -60,24 +62,32 @@ irq_common:
 	mov ss, ax
 	mov ds, ax
 	mov es, ax
+	mov rsi, rsp
 	call irq_handler
-	push rdi
-	sub rdi, 32
-	extern pic_send_eoi
-	call pic_send_eoi
-	pop rdi
+	mov rsp, rax
+	mov rax, current_process
+	cmp qword [rax], qword 0
+	je .continue
+	mov rax, [rax]
+	cmp dword [rax], dword 1
+	je .handle_signal
+.continue:
+	extern lapic_send_eoi
+	call lapic_send_eoi
 	pop rax
 	mov ds, ax
 	mov es, ax
 	popaq
 	iretq
-
-%macro IRQ 2
+.handle_signal:
+	call handle_signal
+	jmp .continue
+%macro IRQ 1
 global irq%1
 irq%1:
 cli
 pushaq
-mov rdi, %2
+mov rdi, %1
 jmp irq_common
 %endmacro
 
@@ -103,14 +113,22 @@ isr_common:
 	mov es, ax
 	mov ss, ax
 	call isr_handler
-
+	mov rax, current_process
+	cmp qword [rax], qword 0
+	je .isr_continue
+	mov rax, [rax]
+	cmp dword [rax], dword 1
+	je .isr_handle_signal
+.isr_continue:
 	pop rax
 	mov ds,ax
 	mov es,ax
 	mov ss, ax
 	popaq
 	iretq
-
+.isr_handle_signal:
+	call handle_signal
+	jmp .isr_continue
 ISR_NOERRCODE 0
 ISR_NOERRCODE 1
 ISR_NOERRCODE 2
@@ -143,47 +161,30 @@ ISR_NOERRCODE 28
 ISR_NOERRCODE 29
 ISR_NOERRCODE 30
 ISR_NOERRCODE 31
-global irq0
-irq0:
-	cli
-	pushaq
-	; load the kernel's segments
-	mov ax, ds
-	push rax
-	mov ax, 0x10
-	mov ds, ax
-	mov ss, ax
-	mov es, ax
-	extern timer_handler
-	call timer_handler
-	mov rdi, rsp
-	extern sched_switch_thread
-	call sched_switch_thread
-	mov rsp, rax
-	; reload segs
-	pop rax
-	mov ds, ax
-	mov es, ax
-	mov al, 0x20
-	out 0x20, al
-	popaq
-	iretq
-
-IRQ 1,33
-IRQ 2,34
-IRQ 3,35
-IRQ 4,36
-IRQ 5,37
-IRQ 6,38
-IRQ 7 ,39
-IRQ 8 ,40
-IRQ 9 ,41
-IRQ 10 ,42
-IRQ 11 ,43
-IRQ 12 ,44
-IRQ 13 ,45
-IRQ 14 ,46
-IRQ 15 ,47
+IRQ 0
+IRQ 1
+IRQ 2
+IRQ 3
+IRQ 4
+IRQ 5
+IRQ 6
+IRQ 7
+IRQ 8
+IRQ 9
+IRQ 10
+IRQ 11
+IRQ 12
+IRQ 13
+IRQ 14
+IRQ 15
+IRQ 16
+IRQ 17
+IRQ 18
+IRQ 19
+IRQ 20
+IRQ 21
+IRQ 22
+IRQ 23
 %macro syscallsaveregs 0
 	push rbx
 	push rcx
@@ -217,7 +218,10 @@ IRQ 15 ,47
 global __syscall_int
 extern syscall_list
 extern SYSCALL_MAX_NUM
+extern errno
 section .data
+; Forkstack, forkret, and forkretregs are dangerous.
+; Rage condition waiting to happen...
 global forkstack
 forkstack: dq 0
 global forkret
@@ -243,7 +247,9 @@ __syscall_int:
 	mov [forkret], r10
 	mov [forkretregs], rsp
 	call [syscall_list + rax * 8]
-.syscall_exit:	pop rcx
+.syscall_exit:
+	mov r11, errno
+	pop rcx
 	mov ds, cx
 	mov es, cx
 	syscallpopregs

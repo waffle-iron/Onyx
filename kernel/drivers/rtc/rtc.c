@@ -8,11 +8,15 @@
  * General Public License version 2 as published by the Free Software
  * Foundation.
  *----------------------------------------------------------------------*/
-#include <drivers/nmi.h>
-#include <drivers/rtc.h>
-#include <kernel/portio.h>
 #include <stdbool.h>
 #include <stdio.h>
+
+#include <kernel/portio.h>
+#include <kernel/irq.h>
+#include <kernel/pic.h>
+#include <drivers/nmi.h>
+#include <drivers/rtc.h>
+
 void nmi_enable()
 {
 	outb(0x70, inb(0x70) & 0x7F);
@@ -94,8 +98,8 @@ uint64_t get_unix_time(const date_t const *udate)
 
 	return utime;
 }
-static volatile date_t date;
-void rtc_handler()
+static date_t date;
+static uintptr_t rtc_handler(registers_t *regs)
 {
 	date.seconds = rtc_get_date_reg(RTC_REG_SECONDS);
 	date.minutes = rtc_get_date_reg(RTC_REG_MINUTES);
@@ -103,11 +107,12 @@ void rtc_handler()
 	date.day = rtc_get_date_reg(RTC_REG_MONTH_DAY);
 	date.month = rtc_get_date_reg(RTC_REG_MONTH);
 	date.year = rtc_get_date_reg(RTC_REG_CENTURY) * 100 + rtc_get_date_reg(RTC_REG_YEAR);
-	date.unixtime = get_unix_time(&date);
+	date.unixtime = get_unix_time((const date_t *const) &date);
 	// Needed for the RTC to fire again
 	outb(0x70, RTC_STATUS_REG_C);
 	asm volatile("":::"memory");
 	inb(0x71);
+	return 0;
 }
 void init_rtc()
 {

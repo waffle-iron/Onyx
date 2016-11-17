@@ -8,30 +8,36 @@
  * General Public License version 2 as published by the Free Software
  * Foundation.
  *----------------------------------------------------------------------*/
+#include <dirent.h>
+#include <mbr.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
-#include <kernel/tty.h>
+#include <errno.h>
+
+#include <sys/time.h>
 #include <sys/types.h>
+#include <sys/mman.h>
+
+#include <sys/uio.h>
+
+#include <kernel/tty.h>
 #include <kernel/process.h>
 #include <kernel/vmm.h>
-#include <errno.h>
 #include <kernel/elf.h>
 #include <kernel/panic.h>
-#include <sys/mman.h>
-#include <drivers/rtc.h>
-#include <sys/time.h>
 #include <kernel/power_management.h>
-#include <sys/uio.h>
-#include <dirent.h>
-#include <mbr.h>
+
+#include <drivers/rtc.h>
+
 #ifdef DEBUG_SYSCALL
 #define DEBUG_PRINT_SYSTEMCALL() printf("%s: syscall\n", __func__)
 #else
 #define DEBUG_PRINT_SYSTEMCALL() asm volatile("nop")
 #endif
 
-const uint32_t SYSCALL_MAX_NUM = 27;
+const uint32_t SYSCALL_MAX_NUM = 34;
 spinlock_t lseek_spl;
 off_t sys_lseek(int fd, off_t offset, int whence)
 {
@@ -71,7 +77,9 @@ ssize_t sys_write(int fd, const void *buf, size_t count)
 	DEBUG_PRINT_SYSTEMCALL();
 
 	if(fd == 1)
+	{
 		tty_write(buf, count);
+	}
 	release_spinlock(&write_spl);
 	return count;
 }
@@ -98,7 +106,20 @@ void *sys_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t off
 		if(!mapping_addr)
 			mapping_addr = vmm_allocate_virt_address(0, pages, VMM_TYPE_REGULAR, vm_prot);
 	}
-	printf("Returning %p\n", mapping_addr);
+	if(fd != 0)
+	{
+		printf("Mapping fb!\n");
+		uintptr_t virt = (uintptr_t)mapping_addr, phys = (uintptr_t) virtual2phys(softfb_getfb());
+		for(int i = 0; i < 1024; i++)
+		{
+			paging_map_phys_to_virt(virt, phys, vm_prot);
+			virt+=0x1000;
+			phys+=0x1000;
+			asm volatile("invlpg %0"::"m"(virt));
+		}
+		printf("done!\n");
+		return mapping_addr;
+	}
 	if(!mapping_addr)
 		return errno = ENOMEM, NULL;
 	if(!vmm_map_range(mapping_addr, pages, vm_prot))
@@ -182,7 +203,6 @@ ssize_t sys_read(int fd, const void *buf, size_t count)
 uint64_t sys_getpid()
 {
 	DEBUG_PRINT_SYSTEMCALL();
-
 	return current_process->pid;
 }
 spinlock_t open_spl;
@@ -322,12 +342,12 @@ int sys_posix_spawn(pid_t *pid, const char *path, void *file_actions, void *attr
 		return errno = EINVAL, -1;
 	if(!vmm_is_mapped((void*) path))
 		return errno = EINVAL, -1;
-	if(!vmm_is_mapped(argv))
+	/*if(!vmm_is_mapped(argv))
 		return errno = EINVAL, -1;
 	if(!vmm_is_mapped(envp))
-		return errno = EINVAL, -1;
+		return errno = EINVAL, -1;*/
 	DEBUG_PRINT_SYSTEMCALL();
-
+	printf("Acquiring spinlock!\n");
 	acquire_spinlock(&posix_spawn_spl);
 	// Create a new clean process
 	process_t *new_proc = process_create(path, &current_process->ctx, current_process);
@@ -337,7 +357,7 @@ int sys_posix_spawn(pid_t *pid, const char *path, void *file_actions, void *attr
 		release_spinlock(&posix_spawn_spl);
 		return errno = ENOMEM, -1;
 	}
-	// Parse through the argv
+	/*// Parse through the argv
 	size_t num_args = 1;
 	size_t total_size = strlen(path) + 1 + sizeof(uintptr_t);
 	char **n = argv;
@@ -373,7 +393,7 @@ int sys_posix_spawn(pid_t *pid, const char *path, void *file_actions, void *attr
 		strcpy(argument_strings, argv[i-1]);
 		argument_strings += strlen(argv[i-1]) + 1;
 	}
-	/*size_t total_env = 0;
+	size_t total_env = 0;
 	size_t num_vars = 0;
 	n = envp;
 	while(*n != NULL)
@@ -417,13 +437,14 @@ int sys_posix_spawn(pid_t *pid, const char *path, void *file_actions, void *attr
 							* which we will need for later 
 							*/
 	new_proc->num_areas = num_r;
-	uintptr_t *new_arguments = vmm_allocate_virt_address(0, pages, VMM_TYPE_REGULAR, VMM_WRITE | VMM_NOEXEC | VMM_USER);
+	printf("Hilarious!\n");
+	/*uintptr_t *new_arguments = vmm_allocate_virt_address(0, pages, VMM_TYPE_REGULAR, VMM_WRITE | VMM_NOEXEC | VMM_USER);
 	vmm_map_range(new_arguments, pages, VMM_WRITE | VMM_NOEXEC | VMM_USER);
 	memcpy(new_arguments, arguments, pages * PAGE_SIZE);
 	for(size_t i = 0; i < num_args; i++)
 	{
 		new_arguments[i] = ((uint64_t)new_arguments[i] - (uint64_t)arguments) + (uint64_t)new_arguments;
-	}
+	}*/
 	// Allocate space for %fs TODO: Do this while in elf_load, as we need the TLS size
 	uintptr_t *fs = vmm_allocate_virt_address(0, 1, VMM_TYPE_REGULAR, VMM_WRITE | VMM_NOEXEC | VMM_USER);
 	vmm_map_range(fs, 1, VMM_WRITE | VMM_NOEXEC | VMM_USER);
@@ -437,7 +458,7 @@ int sys_posix_spawn(pid_t *pid, const char *path, void *file_actions, void *attr
 	}*/
 	void *entry = elf_load((void *) buffer);
 	// Create the new thread
-	process_create_thread(new_proc, (ThreadCallback) entry, 0, num_args, (char**)new_arguments, NULL);
+	process_create_thread(new_proc, (ThreadCallback) entry, 0, 0, NULL, NULL);
 	new_proc->cr3 = new_pt;
 	vmm_stop_spawning();
 	asm volatile("mov %0, %%cr3"::"r"(current_pml4));
@@ -529,14 +550,14 @@ extern process_t *first_process;
 static spinlock_t execve_spl;
 int sys_execve(char *path, char *argv[], char *envp[])
 {
-	if(!vmm_is_mapped(path))
+	/*if(!vmm_is_mapped(path))
 		return errno = EINVAL, -1;
 	if(!vmm_is_mapped(argv))
 		return errno = EINVAL, -1;
 	if(!vmm_is_mapped(envp))
-		return errno = EINVAL, -1;
+		return errno = EINVAL, -1;*/
 	DEBUG_PRINT_SYSTEMCALL();
-
+	asm volatile("cli");
 	acquire_spinlock(&execve_spl);
 	size_t areas;
 	vmm_entry_t *entries;
@@ -552,13 +573,15 @@ int sys_execve(char *path, char *argv[], char *envp[])
 	char *buffer = malloc(in->size);
 	if (!buffer)
 		return errno = ENOMEM;
-	size_t read = read_vfs(0, in->size, buffer, in);
-	if (read != in->size)
-		return errno = EAGAIN;
+	printf("Buffer: %p\n", buffer);
+	in->read(0, in->size, buffer, in);
+	printf("HE\n");
 	asm volatile ("mov %0, %%cr3" :: "r"(current_process->cr3)); /* We can't use paging_load_cr3 because that would change current_pml4
 							* which we will need for later 
 							*/
+	printf("Eh\n");
 	void *entry = elf_load((void *) buffer);
+	printf("Loaded the elf file!\n");
 	asm volatile("cli");
 	thread_t *t = sched_create_thread((ThreadCallback) entry,0, NULL);
 	t->owner = current_process;
@@ -568,6 +591,7 @@ int sys_execve(char *path, char *argv[], char *envp[])
 	asm volatile ("mov %0, %%cr3" :: "r"(current_pml4)); /* We can't use paging_load_cr3 because that would change current_pml4
 							* which we will need for later 
 							*/
+	printf("Hey\n");
 	asm volatile("sti");
 	while(1);
 }
@@ -637,7 +661,18 @@ ssize_t sys_readv(int fd, const struct iovec *vec, int veccnt)
 {
 	if(!vmm_is_mapped((void*) vec))
 		return errno = EINVAL, -1;
-
+	if (fd == STDIN_FILENO)
+	{
+		char *kb_buf = tty_wait_for_line();
+		for(int i = 0; i < veccnt; i++)
+		{
+			memcpy(vec[i].iov_base, kb_buf, vec[i].iov_len);
+		}
+		tty_keyboard_pos = 0;
+		memset(kb_buf, 0, vec[0].iov_len);
+		memmove(kb_buf, &kb_buf[vec[0].iov_len], vec[0].iov_len);
+		return vec[0].iov_len;
+	}
 	DEBUG_PRINT_SYSTEMCALL();
 	if(validate_fd(fd))
 		return -1;
@@ -738,10 +773,54 @@ int sys_getdents(int fd, struct dirent *dirp, unsigned int count)
 }
 int sys_ioctl(int fd, int request, va_list args)
 {
+	DEBUG_PRINT_SYSTEMCALL();
+
 	if(validate_fd(fd))
 		return errno = EBADF, -1;
 	ioctx_t *ctx = &current_process->ctx;
 	return ioctl_vfs(request, args, ctx->file_desc[fd]->vfs_node);
+}
+int sys_kill(pid_t pid, int sig)
+{
+	DEBUG_PRINT_SYSTEMCALL();
+
+	process_t *p = NULL;
+	if((int)pid > 0)
+	{
+		if(pid == current_process->pid)
+		{
+			p = current_process;
+		}
+		else
+			p = get_process_from_pid(pid);
+		if(!p)
+			return errno = ESRCH, -1;	
+	}
+	if(sig == 0)
+		return 0;
+	if(sig > 26)
+		return errno = EINVAL, -1;
+	if(sig < 0)
+		return errno = EINVAL, -1;
+	current_process->signal_pending = 1;
+	current_process->sinfo.signum = sig;
+	return 0;
+}
+int sys_truncate(const char *path, off_t length)
+{
+	return errno = ENOSYS, -1;
+}
+int sys_ftruncate(int fd, off_t length)
+{
+	if(validate_fd(fd))
+		return errno = EBADF, -1;
+	return errno = ENOSYS, -1; 
+}
+int sys_personality(unsigned long val)
+{
+	// TODO: Use this syscall for something. This might be potentially very useful
+	current_process->personality = val;
+	return 0;
 }
 void *syscall_list[] =
 {
@@ -762,7 +841,7 @@ void *syscall_list[] =
 	[14] = (void*) sys_mount,
 	[15] = (void*) sys_execve,
 	[16] = (void*) sys_brk,
-	[17] = (void*) sys_nosys,
+	[17] = (void*) sys_kill,
 	[18] = (void*) sys_getppid,
 	[19] = (void*) sys_wait,
 	[20] = (void*) sys_time,
@@ -774,5 +853,8 @@ void *syscall_list[] =
 	[26] = (void*) sys_preadv,
 	[27] = (void*) sys_pwritev,
 	[28] = (void*) sys_getdents,
-	[29] = (void*) sys_ioctl
+	[29] = (void*) sys_ioctl,
+	[30] = (void*) sys_truncate,
+	[31] = (void*) sys_ftruncate,
+	[32] = (void*) sys_personality
 };
