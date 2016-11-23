@@ -30,7 +30,6 @@
 #include <kernel/power_management.h>
 
 #include <drivers/rtc.h>
-
 #ifdef DEBUG_SYSCALL
 #define DEBUG_PRINT_SYSTEMCALL() printf("%s: syscall\n", __func__)
 #else
@@ -160,15 +159,13 @@ int sys_mprotect(void *addr, size_t len, int prot)
 	vmm_change_perms(addr, pages, vm_prot);
 	return 0;
 }
-spinlock_t read_spl;
 extern int tty_keyboard_pos;
 ssize_t sys_read(int fd, const void *buf, size_t count)
 {
-	if(!vmm_is_mapped((void*) buf))
-		return errno = EINVAL, -1;
+	/*if(!vmm_is_mapped((void*) buf))
+		return errno = EINVAL, -1;*/
 	DEBUG_PRINT_SYSTEMCALL();
 
-	acquire_spinlock(&read_spl);
 	if (fd == STDIN_FILENO)
 	{
 		char *kb_buf = tty_wait_for_line();
@@ -176,28 +173,23 @@ ssize_t sys_read(int fd, const void *buf, size_t count)
 		tty_keyboard_pos = 0;
 		memset(kb_buf, 0, count);
 		memmove(kb_buf, &kb_buf[count], count);
-		release_spinlock(&read_spl);
 		return count;
 	}
 	ioctx_t *ioctx = &current_process->ctx;
 	if( fd > UINT16_MAX)
 	{
-		release_spinlock(&read_spl);
 		return errno = EBADF;
 	}
 	if(ioctx->file_desc[fd] == NULL)
 	{
-		release_spinlock(&read_spl);
 		return errno = EBADF;
 	}
 	if(!buf)
 	{
-		release_spinlock(&read_spl);
 		return errno = EINVAL;
 	}
 	ssize_t size = read_vfs(ioctx->file_desc[fd]->seek, count, (char*)buf, ioctx->file_desc[fd]->vfs_node);
 	ioctx->file_desc[fd]->seek += size;
-	release_spinlock(&read_spl);
 	return size;
 }
 uint64_t sys_getpid()
@@ -327,10 +319,9 @@ void sys__exit(int status)
 	{
 		printf("Panic: %s returned!\n", current_process->cmd_line);
 		asm volatile("sti");
-		for(;;) asm volatile("pause");
+		for(;;);
 	}
 	current_process->has_exited = status;
-	sched_destroy_thread(get_current_thread());
 	asm volatile("sti");
 	while(1) asm volatile("hlt");
 }
@@ -357,7 +348,7 @@ int sys_posix_spawn(pid_t *pid, const char *path, void *file_actions, void *attr
 		release_spinlock(&posix_spawn_spl);
 		return errno = ENOMEM, -1;
 	}
-	/*// Parse through the argv
+	// Parse through the argv
 	size_t num_args = 1;
 	size_t total_size = strlen(path) + 1 + sizeof(uintptr_t);
 	char **n = argv;
@@ -415,7 +406,7 @@ int sys_posix_spawn(pid_t *pid, const char *path, void *file_actions, void *attr
 		variables[i] = (uint64_t)variable_strings;
 		strcpy(variable_strings, envp[i]);
 		variable_strings += strlen(envp[i]) + 1;
-	}*/
+	}
 	// Open the elf file and read from it
 	vfsnode_t *in = open_vfs(fs_root, path);
 	if (!in)
@@ -437,28 +428,28 @@ int sys_posix_spawn(pid_t *pid, const char *path, void *file_actions, void *attr
 							* which we will need for later 
 							*/
 	new_proc->num_areas = num_r;
-	printf("Hilarious!\n");
-	/*uintptr_t *new_arguments = vmm_allocate_virt_address(0, pages, VMM_TYPE_REGULAR, VMM_WRITE | VMM_NOEXEC | VMM_USER);
+	uintptr_t *new_arguments = vmm_allocate_virt_address(0, pages, VMM_TYPE_REGULAR, VMM_WRITE | VMM_NOEXEC | VMM_USER);
 	vmm_map_range(new_arguments, pages, VMM_WRITE | VMM_NOEXEC | VMM_USER);
 	memcpy(new_arguments, arguments, pages * PAGE_SIZE);
 	for(size_t i = 0; i < num_args; i++)
 	{
 		new_arguments[i] = ((uint64_t)new_arguments[i] - (uint64_t)arguments) + (uint64_t)new_arguments;
-	}*/
+	}
 	// Allocate space for %fs TODO: Do this while in elf_load, as we need the TLS size
 	uintptr_t *fs = vmm_allocate_virt_address(0, 1, VMM_TYPE_REGULAR, VMM_WRITE | VMM_NOEXEC | VMM_USER);
 	vmm_map_range(fs, 1, VMM_WRITE | VMM_NOEXEC | VMM_USER);
 	new_proc->fs = (uintptr_t) fs;
-	/*uintptr_t *new_envp = vmm_allocate_virt_address(0, env_pages, VMM_TYPE_REGULAR, VMM_WRITE | VMM_NOEXEC | VMM_USER);
+	uintptr_t *new_envp = vmm_allocate_virt_address(0, env_pages, VMM_TYPE_REGULAR, VMM_WRITE | VMM_NOEXEC | VMM_USER);
 	vmm_map_range(new_envp, env_pages, VMM_WRITE | VMM_NOEXEC | VMM_USER);
 	memcpy(new_envp, variables, env_pages * PAGE_SIZE);
 	for(size_t i = 0; i < num_vars; i++)
 	{
 		new_envp[i] = ((uint64_t)new_envp[i] - (uint64_t)variables) + (uint64_t)new_envp;
-	}*/
+	}
 	void *entry = elf_load((void *) buffer);
 	// Create the new thread
-	process_create_thread(new_proc, (ThreadCallback) entry, 0, 0, NULL, NULL);
+	printf("New args: %p\n", new_arguments);
+	process_create_thread(new_proc, (thread_callback_t) entry, 0, 0, new_arguments, new_envp);
 	new_proc->cr3 = new_pt;
 	vmm_stop_spawning();
 	asm volatile("mov %0, %%cr3"::"r"(current_pml4));
@@ -548,6 +539,8 @@ pid_t sys_getppid()
 }
 extern process_t *first_process;
 static spinlock_t execve_spl;
+#pragma GCC push_options
+#pragma GCC optimize("O2")
 int sys_execve(char *path, char *argv[], char *envp[])
 {
 	/*if(!vmm_is_mapped(path))
@@ -557,8 +550,6 @@ int sys_execve(char *path, char *argv[], char *envp[])
 	if(!vmm_is_mapped(envp))
 		return errno = EINVAL, -1;*/
 	DEBUG_PRINT_SYSTEMCALL();
-	asm volatile("cli");
-	acquire_spinlock(&execve_spl);
 	size_t areas;
 	vmm_entry_t *entries;
 	current_process->cr3 = vmm_clone_as(&entries, &areas);
@@ -573,17 +564,74 @@ int sys_execve(char *path, char *argv[], char *envp[])
 	char *buffer = malloc(in->size);
 	if (!buffer)
 		return errno = ENOMEM;
-	printf("Buffer: %p\n", buffer);
 	in->read(0, in->size, buffer, in);
-	printf("HE\n");
+	int nargs = 0;
+	size_t arg_string_len = strlen(path) + 1;
+	for(; argv[nargs]; nargs++)
+		arg_string_len += strlen(argv[nargs]) + 1;
+	int nenvp = 0;
+	size_t envp_string_len = 0;
+	for(; envp[nenvp]; nenvp++)
+		envp_string_len += strlen(envp[nenvp]) + 1;
+	nargs++;
+	char *intermediary_buffer_args = malloc(arg_string_len);
+	memset(intermediary_buffer_args, 0, arg_string_len);
+	volatile char *temp = intermediary_buffer_args;
+	for(int i = 0; i < nargs; i++)
+	{
+		if(i == 0)
+		{
+			strcpy(temp, path);
+			temp += strlen(path) + 1;
+		}
+		else
+		{
+			strcpy(temp, argv[i-1]);
+			temp += strlen(argv[i-1]) + 1;
+		}
+	}
+	char *intermediary_buffer_envp = malloc(envp_string_len);
+	memset(intermediary_buffer_envp, 0, envp_string_len);
+	temp = intermediary_buffer_envp;
+	for(int i = 0; i < nenvp; i++)
+	{
+		strcpy(temp, envp[i]);
+		temp += strlen(envp[i]) + 1;
+	}
 	asm volatile ("mov %0, %%cr3" :: "r"(current_process->cr3)); /* We can't use paging_load_cr3 because that would change current_pml4
 							* which we will need for later 
 							*/
-	printf("Eh\n");
+	/* Count the arguments and envp */
+	/* Map argv and envp */
+	char **new_args = vmm_allocate_virt_address(0, vmm_align_size_to_pages(sizeof(void*) * nargs), VMM_TYPE_REGULAR, VMM_USER|VMM_WRITE);
+	char **new_envp = vmm_allocate_virt_address(0, vmm_align_size_to_pages(sizeof(void*) * nenvp), VMM_TYPE_REGULAR, VMM_USER|VMM_WRITE);
+	vmm_map_range(new_args, vmm_align_size_to_pages(sizeof(void*) * nargs), VMM_WRITE | VMM_USER | VMM_NOEXEC);
+	vmm_map_range(new_envp, vmm_align_size_to_pages(sizeof(void*) * nenvp), VMM_WRITE | VMM_USER | VMM_NOEXEC);
+	
+	/* Map the actual strings */
+	char *argv_buffer = vmm_allocate_virt_address(0, vmm_align_size_to_pages(arg_string_len), VMM_TYPE_REGULAR, VMM_USER|VMM_WRITE);
+	char *envp_buffer = vmm_allocate_virt_address(0, vmm_align_size_to_pages(envp_string_len), VMM_TYPE_REGULAR, VMM_USER|VMM_WRITE);
+	vmm_map_range(argv_buffer, vmm_align_size_to_pages(arg_string_len), VMM_WRITE | VMM_USER | VMM_NOEXEC);
+	vmm_map_range(envp_buffer, vmm_align_size_to_pages(envp_string_len), VMM_WRITE | VMM_USER | VMM_NOEXEC);
+	
+	/* Copy the buffers */
+	memcpy(argv_buffer, intermediary_buffer_args, arg_string_len);
+	memcpy(envp_buffer, intermediary_buffer_envp, envp_string_len);
+	temp = argv_buffer;
+	for(int i = 0; i < nargs; i++)
+	{
+		new_args[i] = temp;
+		temp += strlen(new_args[i]) + 1;
+	}
+	temp = envp_buffer;
+	for(int i = 0; i < nenvp; i++)
+	{
+		new_envp[i] = temp;
+		temp += strlen(new_envp[i]) + 1;
+	}
 	void *entry = elf_load((void *) buffer);
-	printf("Loaded the elf file!\n");
 	asm volatile("cli");
-	thread_t *t = sched_create_thread((ThreadCallback) entry,0, NULL);
+	thread_t *t = sched_create_main_thread((thread_callback_t) entry, 0, nargs, new_args, new_envp);
 	t->owner = current_process;
 	current_process->threads[0] = t;
 	vmm_stop_spawning();
@@ -591,10 +639,10 @@ int sys_execve(char *path, char *argv[], char *envp[])
 	asm volatile ("mov %0, %%cr3" :: "r"(current_pml4)); /* We can't use paging_load_cr3 because that would change current_pml4
 							* which we will need for later 
 							*/
-	printf("Hey\n");
 	asm volatile("sti");
 	while(1);
 }
+#pragma GCC pop_options
 int sys_wait(int *exitstatus)
 {
 	DEBUG_PRINT_SYSTEMCALL();
@@ -659,8 +707,8 @@ inline int validate_fd(int fd)
 }
 ssize_t sys_readv(int fd, const struct iovec *vec, int veccnt)
 {
-	if(!vmm_is_mapped((void*) vec))
-		return errno = EINVAL, -1;
+	/*if(!vmm_is_mapped((void*) vec))
+		return errno = EINVAL, -1;*/
 	if (fd == STDIN_FILENO)
 	{
 		char *kb_buf = tty_wait_for_line();
@@ -722,12 +770,12 @@ ssize_t sys_writev(int fd, const struct iovec *vec, int veccnt)
 }
 ssize_t sys_preadv(int fd, const struct iovec *vec, int veccnt, off_t offset)
 {
-	if(!vmm_is_mapped((void*) vec))
-		return errno = EINVAL, -1;
+	/*if(!vmm_is_mapped((void*) vec))
+		return errno = EINVAL, -1;*/
 	
 	DEBUG_PRINT_SYSTEMCALL();
-	if(validate_fd(fd))
-		return -1;
+	/*if(validate_fd(fd))
+		return -1;*/
 	ioctx_t *ctx = &current_process->ctx;
 	if(!vec)
 		return errno = EINVAL, -1;

@@ -78,11 +78,15 @@ void libc_late_init()
 {
 	is_init = true;
 }
+#ifdef __is_spartix_kernel
+static spinlock_t spl;
+extern int panicing;
+#endif
 int printf(const char *__restrict__ format, ...)
 {
-/*#ifdef __is_spartix_kernel
-	acquire(&spl);
-#endif*/
+#ifdef __is_spartix_kernel
+	if(panicing != 1) acquire_spinlock(&spl);
+#endif
 #ifdef __is_spartix_kernel
 	va_list parameters;
 	va_start(parameters, format);
@@ -174,9 +178,9 @@ int printf(const char *__restrict__ format, ...)
 	flushPrint();
 	va_end(parameters);
 
-/*ifdef __is_spartix_kernel
-	release(&spl);
-#endif*/
+#ifdef __is_spartix_kernel
+	release_spinlock(&spl);
+#endif
 	return written;
 #else
 	va_list params;

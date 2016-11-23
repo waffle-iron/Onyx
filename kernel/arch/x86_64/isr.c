@@ -61,15 +61,19 @@ static inline bool is_recursive_fault()
 {
 	return faulting;
 }
-void isr_handler(uint64_t err_code, uint64_t int_no)
+void isr_handler(intctx_t *ctx)
 {
+	int int_no = ctx->int_no;
+	uint64_t err_code = ctx->err_code;
 	if(is_recursive_fault())
 	{
 		for(;;);
 	}
+	printf("Exception %u at %p\n", int_no, ctx->rip);
+	printf("RSP: %p\n", ctx->rsp);
 	// Enter the isr handler
 	enter_isr_handler();
-	switch (int_no) {
+	switch (ctx->int_no) {
 	case 0:{
 			panic(exception_msg[int_no]);
 			break;
@@ -94,7 +98,7 @@ void isr_handler(uint64_t err_code, uint64_t int_no)
 			break;
 		}
 	case 6:{
-			panic(exception_msg[int_no]);
+			printf(exception_msg[int_no]);
 			break;
 		}
 	case 7:{
@@ -137,6 +141,7 @@ void isr_handler(uint64_t err_code, uint64_t int_no)
 		if(!entr)
 		{
 		pf:
+			printf("\n");
 			printf("%s0x%X\n",exception_msg[int_no],faulting_address);
 			if(err_code & 0x2)
 				printf(" caused by a write\n");
@@ -148,6 +153,7 @@ void isr_handler(uint64_t err_code, uint64_t int_no)
 				printf("Instruction fetch\n");
                         asm volatile("hlt");
 		}
+		goto pf;
 		if(err_code & 0x2 && ~entr->rwx & VMM_WRITE)
 			goto pf;
 		if(err_code & 0x10 && entr->rwx & VMM_NOEXEC)

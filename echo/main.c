@@ -12,6 +12,9 @@
 #include <string.h>
 int main(int argc, char **argv, char **envp)
 {
-	write(STDOUT_FILENO, "/bin/echo: usage: /bin/echo [arguments]\n", strlen("/bin/echo: usage: /bin/echo [arguments]\n"));
+	if(argc > 1)
+		printf("%s\n", argv[1]);
+	else
+		printf("%s: Usage: %s [arguments]\n", argv[0], argv[0]);
 	return 0;
 }

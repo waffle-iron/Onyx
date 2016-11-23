@@ -64,11 +64,15 @@ extern uint64_t kernel_end;
 #define KERNEL_START_VIRT (KERNEL_VIRTUAL_BASE + KERNEL_START_PHYS)
 extern char __BUILD_NUMBER;
 extern char __BUILD_DATE;
+extern uintptr_t _start_smp;
+extern uintptr_t _end_smp;
 static struct multiboot_tag_module *initrd_tag = NULL;
 uintptr_t address = 0;
 struct multiboot_tag_elf_sections secs;
 struct multiboot_tag_mmap *mmap_tag = NULL;
 void *initrd_addr = NULL;
+static void *tramp = NULL;
+
 void kernel_early(uintptr_t addr, uint32_t magic)
 {
 	addr += PHYS_BASE;
@@ -90,13 +94,8 @@ void kernel_early(uintptr_t addr, uint32_t magic)
 		switch (tag->type) {
 		case MULTIBOOT_TAG_TYPE_BASIC_MEMINFO:
 			{
-				struct multiboot_tag_basic_meminfo *memInfo
-				    =
-				    (struct multiboot_tag_basic_meminfo *)
-				    tag;
-				total_mem =
-				    memInfo->mem_lower +
-				    memInfo->mem_upper;
+				struct multiboot_tag_basic_meminfo *memInfo = (struct multiboot_tag_basic_meminfo *) tag;
+				total_mem = memInfo->mem_lower + memInfo->mem_upper;
 				break;
 			}
 		case MULTIBOOT_TAG_TYPE_MMAP:
@@ -107,15 +106,12 @@ void kernel_early(uintptr_t addr, uint32_t magic)
 			}
 		case MULTIBOOT_TAG_TYPE_FRAMEBUFFER:
 			{
-				tagfb =
-				    (struct multiboot_tag_framebuffer *)
-				    tag;
+				tagfb = (struct multiboot_tag_framebuffer *) tag;
 				break;
 			}
 		case MULTIBOOT_TAG_TYPE_MODULE:
 			{
-				initrd_tag =
-				    (struct multiboot_tag_module *) tag;
+				initrd_tag = (struct multiboot_tag_module *) tag;
 				initrd_size = initrd_tag->size;
 				break;
 			}
@@ -159,6 +155,7 @@ void kernel_early(uintptr_t addr, uint32_t magic)
 }
 uintptr_t rsdp;
 extern void libc_late_init();
+extern void init_keyboard();
 void kernel_main()
 {
 	/* Identify the CPU it's running on (bootstrap CPU) */
@@ -186,7 +183,14 @@ void kernel_main()
 
 	/* Intialize the interrupt part of the CPU (arch dependent) */
 	cpu_init_interrupts();
-	extern void init_keyboard();
+	
+	printf("Trampoline code at: %p\n", tramp);
+	
+	memcpy((void*)tramp, &_start_smp, (uintptr_t)&_end_smp - (uintptr_t)&_start_smp);
+	
+	/* Initialize multi-processors */
+	cpu_init_mp();
+
 	init_keyboard();
 	
 	/* Initialize the kernel heap */
@@ -203,11 +207,16 @@ void kernel_main()
 	/* Initialize the initrd */
 	init_initrd(initrd_addr);
 	
+	asm volatile("cli");
+	/* Initialize the scheduler */
+	if(sched_init())
+		panic("sched: failed to initialize!");
+	
 	/* Initalize multitasking */
 	sched_create_thread(kernel_multitasking, 1, NULL);
 	/* Initialize late libc */
 	libc_late_init();
-	asm volatile ("sti");
+	asm volatile("sti");
 	for (;;)
 	{
 		__asm__ __volatile__("hlt");
@@ -215,6 +224,13 @@ void kernel_main()
 }
 extern int exec(const char *, char**, char**);
 uintptr_t rsdp;
+void test()
+{
+	printf("Sleeping for 1 second!\n");
+	sched_sleep(1000000UL);
+	printf("Done!\n");
+	while(1);
+}
 void kernel_multitasking(void *arg)
 {
 	void *mem = vmm_allocate_virt_address(VM_KERNEL, 1024, VMM_TYPE_REGULAR, VMM_WRITE | VMM_NOEXEC | VMM_GLOBAL);
@@ -229,7 +245,7 @@ void kernel_multitasking(void *arg)
 	/*extern void init_elf_symbols(struct multiboot_tag_elf_sections *);
 	init_elf_symbols(&secs);*/
 	initialize_ata();
-
+	
 	char *args[] = {"/etc/fstab", NULL};
 	char *envp[] = {"PATH=/bin:/usr/bin:/usr/lib", NULL};
 	init_ext2drv();
@@ -240,8 +256,8 @@ void kernel_multitasking(void *arg)
 	else
 		printf("eth0: found compatible device\n");*/
 	//dhcp_initialize();
-	/*read_partitions();
-	vfsnode_t *in = open_vfs(fs_root, "/etc/fstab");
+	//read_partitions();
+	/*vfsnode_t *in = open_vfs(fs_root, "/etc/fstab");
 	if (!in)
 	{
 		printf("%s: %s\n", "/etc/fstab", strerror(errno));
@@ -249,7 +265,9 @@ void kernel_multitasking(void *arg)
 	}
 	char *b = malloc(in->size);
 	memset(b, 0, in->size);
-	write_vfs(0, in->size, b, in);*/
+	write_vfs(0, in->size, b, in);
+	printf("%s\n", b);*/
+	//sched_create_thread(test, 1, NULL);
 	initialize_entropy();
 	exec("/sbin/init", args, envp);
 	for (;;) asm volatile("hlt");
