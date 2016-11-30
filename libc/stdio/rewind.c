@@ -8,12 +8,11 @@
  * General Public License version 2 as published by the Free Software
  * Foundation.
  *----------------------------------------------------------------------*/
-#include <string.h>
-int main(int argc, char **argv, char **envp)
+#include <stddef.h>
+#include <stdint.h>
+#include "stdio_impl.h"
+#include <stdio.h>
+void rewind(FILE *stream)
 {
-	if(argc > 1)
-		printf("%s\n", argv[1]);
-	else
-		printf("%s: Usage: %s [arguments]\n", argv[0], argv[0]);
-	return 0;
+	__stdio_rewind(stream);
 }

@@ -12,16 +12,30 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include "stdio_impl.h"
-#include <sys/syscall.h>
 #include <unistd.h>
+#include <fcntl.h>
+
+#include "stdio_impl.h"
+
+#include <sys/syscall.h>
 #include <sys/uio.h>
 FILE *__stdio_open(const char *path, const char *attrb)
 {
 	FILE *file = malloc(sizeof(FILE));
 	memset(file, 0, sizeof(FILE));
-	(void) attrb;
-	file->fd = open(path, 0); // Fix this to use open(3)'s attributes (see POSIX.1-2008), still needs support in the kernel
+	int open_perms = O_RDONLY;
+	if(strcmp((char*) attrb, "r") == 0)
+		open_perms = O_RDONLY;
+	else if(strcmp((char*) attrb, "w") == 0)
+		open_perms = O_WRONLY;
+	else if(strcmp((char*) attrb, "rw") == 0)
+		open_perms = O_RDWR;
+	file->fd = open(path, open_perms);
+	if(file->fd == -1)
+	{
+		free(file);
+		return NULL;
+	}
 	return file;
 }
 size_t __stdio_write(const void *ptr, size_t size, size_t nmemb, FILE *stream)
@@ -43,7 +57,6 @@ size_t __stdio_read(const void *ptr, size_t size, size_t nmemb, FILE *stream)
 			exit(EXIT_FAILURE);
 		memset(stream->buf, 0, size);
 	}
-
 	struct iovec v[2] = {0};
 	size_t passed_size = size * nmemb;
 	v[0].iov_base = (void*) stream->buf;
@@ -71,4 +84,27 @@ void __stdio_rewind(FILE *stream)
 {
 	lseek(stream->fd, 0, SEEK_SET);
 	stream->off = 0;
+}
+char *__stdio_gets(char *buf)
+{
+	size_t size = STDIO_DEFAULT_GETS_SIZE;
+	if(size > stdin->buf_size)
+	{
+		if(stdin->buf)
+			free(stdin->buf);
+		stdin->buf = malloc(size);
+		if(!stdin->buf)
+			exit(EXIT_FAILURE);
+		memset(stdin->buf, 0, size);
+	}
+	ssize_t r = read(stdin->fd, stdin->buf, stdin->buf_size);
+	memcpy(buf, stdin->buf, r);
+	return buf;
+}
+int __stdio_close(FILE *file)
+{
+	close(file->fd);
+	free(file->buf);
+	free(file);
+	return 0;
 }

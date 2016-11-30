@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 
 #include <sys/time.h>
 #include <sys/types.h>
@@ -31,12 +32,25 @@
 
 #include <drivers/rtc.h>
 
+#define DEBUG_SYSCALL 1
+#undef DEBUG_SYSCALL
+
 #ifdef DEBUG_SYSCALL
 #define DEBUG_PRINT_SYSTEMCALL() printf("%s: syscall\n", __func__)
 #else
 #define DEBUG_PRINT_SYSTEMCALL() asm volatile("nop")
 #endif
-
+inline int validate_fd(int fd)
+{
+	if(fd > UINT16_MAX)
+	{
+		return errno = EBADF;
+	}
+	ioctx_t *ctx = &current_process->ctx;
+	if(ctx->file_desc[fd] == NULL)
+		return errno = EBADF;
+	return 0;
+}
 const uint32_t SYSCALL_MAX_NUM = 34;
 spinlock_t lseek_spl;
 off_t sys_lseek(int fd, off_t offset, int whence)
@@ -78,11 +92,11 @@ ssize_t sys_write(int fd, const void *buf, size_t count)
 		return errno = EINVAL, -1;
 	acquire_spinlock(&write_spl);
 	DEBUG_PRINT_SYSTEMCALL();
-
-	if(fd == 1)
-	{
-		tty_write(buf, count);
-	}
+	if(!current_process->ctx.file_desc[fd]->flags & O_WRONLY)
+		return errno = EROFS, -1;
+	if(validate_fd(fd))
+		return errno = EBADF, -1;
+	write_vfs(current_process->ctx.file_desc[fd]->seek, count, buf, current_process->ctx.file_desc[fd]->vfs_node);
 	release_spinlock(&write_spl);
 	return count;
 }
@@ -163,22 +177,12 @@ int sys_mprotect(void *addr, size_t len, int prot)
 	vmm_change_perms(addr, pages, vm_prot);
 	return 0;
 }
-extern int tty_keyboard_pos;
 ssize_t sys_read(int fd, const void *buf, size_t count)
 {
 	/*if(!vmm_is_mapped((void*) buf))
 		return errno = EINVAL, -1;*/
 	DEBUG_PRINT_SYSTEMCALL();
 
-	if (fd == STDIN_FILENO)
-	{
-		char *kb_buf = tty_wait_for_line();
-		memcpy((void*) buf, kb_buf, count);
-		tty_keyboard_pos = 0;
-		memset(kb_buf, 0, count);
-		memmove(kb_buf, &kb_buf[count], count);
-		return count;
-	}
 	ioctx_t *ioctx = &current_process->ctx;
 	if( fd > UINT16_MAX)
 	{
@@ -192,6 +196,8 @@ ssize_t sys_read(int fd, const void *buf, size_t count)
 	{
 		return errno = EINVAL;
 	}
+	if(!ioctx->file_desc[fd]->flags & O_RDONLY)
+		return errno = EBADF, -1;
 	ssize_t size = read_vfs(ioctx->file_desc[fd]->seek, count, (char*)buf, ioctx->file_desc[fd]->vfs_node);
 	ioctx->file_desc[fd]->seek += size;
 	return size;
@@ -219,6 +225,11 @@ int sys_open(const char *filename, int flags)
 			ioctx->file_desc[i] = malloc(sizeof(file_desc_t));
 			memset(ioctx->file_desc[i], 0, sizeof(file_desc_t));
 			ioctx->file_desc[i]->vfs_node = open_vfs(fs_root, filename);
+			if(!ioctx->file_desc[i]->vfs_node)
+			{
+				free(ioctx->file_desc[i]);
+				return errno = ENOENT, -1;
+			}
 			ioctx->file_desc[i]->vfs_node->refcount++;
 			ioctx->file_desc[i]->seek = 0;
 			ioctx->file_desc[i]->flags = flags;
@@ -227,7 +238,7 @@ int sys_open(const char *filename, int flags)
 		}
 	}
 	release_spinlock(&open_spl);
-	return errno = EMFILE;
+	return errno = EMFILE, -1;
 }
 spinlock_t close_spl;
 int sys_close(int fd)
@@ -452,7 +463,6 @@ int sys_posix_spawn(pid_t *pid, const char *path, void *file_actions, void *attr
 	}
 	void *entry = elf_load((void *) buffer);
 	// Create the new thread
-	printf("New args: %p\n", new_arguments);
 	process_create_thread(new_proc, (thread_callback_t) entry, 0, 0, new_arguments, new_envp);
 	new_proc->cr3 = new_pt;
 	vmm_stop_spawning();
@@ -542,25 +552,30 @@ pid_t sys_getppid()
 }
 extern process_t *first_process;
 static spinlock_t execve_spl;
+extern _Bool is_spawning;
+extern int is_dbg_tss;
 #pragma GCC push_options
 #pragma GCC optimize("O2")
 int sys_execve(char *path, char *argv[], char *envp[])
 {
-	/*if(!vmm_is_mapped(path))
+	if(!vmm_is_mapped(path))
 		return errno = EINVAL, -1;
 	if(!vmm_is_mapped(argv))
 		return errno = EINVAL, -1;
 	if(!vmm_is_mapped(envp))
-		return errno = EINVAL, -1;*/
+		return errno = EINVAL, -1;
 	DEBUG_PRINT_SYSTEMCALL();
 	size_t areas;
 	vmm_entry_t *entries;
 	current_process->cr3 = vmm_clone_as(&entries, &areas);
+	is_spawning = 0;
 	current_process->areas = entries;
 	current_process->num_areas = areas;
 	vfsnode_t *in = open_vfs(fs_root, path);
 	if (!in)
 	{
+		errno = ENOENT;
+		perror(NULL);
 		release_spinlock(&execve_spl);
 		return errno = ENOENT;
 	}
@@ -605,6 +620,8 @@ int sys_execve(char *path, char *argv[], char *envp[])
 							* which we will need for later 
 							*/
 	/* Count the arguments and envp */
+	void *entry = elf_load((void *) buffer);
+
 	/* Map argv and envp */
 	char **new_args = vmm_allocate_virt_address(0, vmm_align_size_to_pages(sizeof(void*) * nargs), VMM_TYPE_REGULAR, VMM_USER|VMM_WRITE);
 	char **new_envp = vmm_allocate_virt_address(0, vmm_align_size_to_pages(sizeof(void*) * nenvp), VMM_TYPE_REGULAR, VMM_USER|VMM_WRITE);
@@ -632,12 +649,18 @@ int sys_execve(char *path, char *argv[], char *envp[])
 		new_envp[i] = temp;
 		temp += strlen(new_envp[i]) + 1;
 	}
-	void *entry = elf_load((void *) buffer);
 	asm volatile("cli");
 	thread_t *t = sched_create_main_thread((thread_callback_t) entry, 0, nargs, new_args, new_envp);
+	sched_destroy_thread(current_process->threads[0]);
+	/* Set the appropriate uid and gid */
+	if(current_process->setuid != 0)
+		current_process->uid = current_process->setuid;
+	if(current_process->setgid != 0)
+		current_process->gid = current_process->setgid;
+	current_process->setuid = 0;
+	current_process->setgid = 0;
 	t->owner = current_process;
 	current_process->threads[0] = t;
-	vmm_stop_spawning();
 	release_spinlock(&execve_spl);
 	asm volatile ("mov %0, %%cr3" :: "r"(current_pml4)); /* We can't use paging_load_cr3 because that would change current_pml4
 							* which we will need for later 
@@ -697,45 +720,25 @@ void sys_shutdown()
 	DEBUG_PRINT_SYSTEMCALL();
 	pm_shutdown();
 }
-inline int validate_fd(int fd)
-{
-	if(fd > UINT16_MAX)
-	{
-		return errno = EBADF;
-	}
-	ioctx_t *ctx = &current_process->ctx;
-	if(ctx->file_desc[fd] == NULL)
-		return errno = EBADF;
-	return 0;
-}
 ssize_t sys_readv(int fd, const struct iovec *vec, int veccnt)
 {
 	/*if(!vmm_is_mapped((void*) vec))
 		return errno = EINVAL, -1;*/
-	if (fd == STDIN_FILENO)
-	{
-		char *kb_buf = tty_wait_for_line();
-		for(int i = 0; i < veccnt; i++)
-		{
-			memcpy(vec[i].iov_base, kb_buf, vec[i].iov_len);
-		}
-		tty_keyboard_pos = 0;
-		memset(kb_buf, 0, vec[0].iov_len);
-		memmove(kb_buf, &kb_buf[vec[0].iov_len], vec[0].iov_len);
-		return vec[0].iov_len;
-	}
 	DEBUG_PRINT_SYSTEMCALL();
 	if(validate_fd(fd))
-		return -1;
+		return errno = EBADF, -1;
 	ioctx_t *ctx = &current_process->ctx;
 	if(!vec)
 		return errno = EINVAL, -1;
 	if(veccnt == 0)
 		return 0;
+	if(!ctx->file_desc[fd]->flags & O_RDONLY)
+		return errno = EBADF, -1;
 	size_t read = 0;
+	read_vfs(ctx->file_desc[fd]->seek, vec[0].iov_len, vec[0].iov_base, ctx->file_desc[fd]->vfs_node);
 	for(int i = 0; i < veccnt; i++)
 	{
-		read_vfs(ctx->file_desc[fd]->seek, vec[i].iov_len, vec[i].iov_base, ctx->file_desc[fd]->vfs_node);
+		memcpy(vec[i].iov_base, vec[0].iov_base, vec[i].iov_len);
 		read += vec[i].iov_len;
 	}
 	return read;
@@ -747,16 +750,6 @@ ssize_t sys_writev(int fd, const struct iovec *vec, int veccnt)
 	
 	DEBUG_PRINT_SYSTEMCALL();
 	size_t wrote = 0;
-
-	if(fd == STDOUT_FILENO)
-	{
-		for(int i = 0; i < veccnt; i++)
-		{
-			tty_write(vec[i].iov_base, vec[i].iov_len);
-			wrote += vec[i].iov_len;
-		}
-		return wrote;
-	}
 	if(validate_fd(fd))
 		return -1;
 	ioctx_t *ctx = &current_process->ctx;
@@ -764,6 +757,8 @@ ssize_t sys_writev(int fd, const struct iovec *vec, int veccnt)
 		return errno = EINVAL, -1;
 	if(veccnt == 0)
 		return 0;
+	if(!ctx->file_desc[fd]->flags & O_WRONLY)
+		return errno = EROFS, -1;
 	for(int i = 0; i < veccnt; i++)
 	{
 		write_vfs(ctx->file_desc[fd]->seek, vec[i].iov_len, vec[i].iov_base, ctx->file_desc[fd]->vfs_node);
@@ -784,6 +779,8 @@ ssize_t sys_preadv(int fd, const struct iovec *vec, int veccnt, off_t offset)
 		return errno = EINVAL, -1;
 	if(veccnt == 0)
 		return 0;
+	if(!ctx->file_desc[fd]->flags & O_RDONLY)
+		return errno = EBADF, -1;
 	size_t read = 0;
 	for(int i = 0; i < veccnt; i++)
 	{
@@ -802,6 +799,8 @@ ssize_t sys_pwritev(int fd, const struct iovec *vec, int veccnt, off_t offset)
 	ioctx_t *ctx = &current_process->ctx;
 	if(veccnt == 0)
 		return 0;
+	if(!ctx->file_desc[fd]->flags & O_WRONLY)
+		return errno = EROFS, -1;
 	size_t wrote = 0;
 	for(int i = 0; i < veccnt; i++)
 	{
@@ -869,9 +868,38 @@ int sys_ftruncate(int fd, off_t length)
 }
 int sys_personality(unsigned long val)
 {
+	DEBUG_PRINT_SYSTEMCALL();
 	// TODO: Use this syscall for something. This might be potentially very useful
 	current_process->personality = val;
 	return 0;
+}
+int sys_setuid(uid_t uid)
+{
+	DEBUG_PRINT_SYSTEMCALL();
+
+	if(uid == 0 && current_process->uid != 0)
+		return errno = EPERM, -1;
+	current_process->setuid = uid;
+	return 0;
+}
+int sys_setgid(gid_t gid)
+{
+	DEBUG_PRINT_SYSTEMCALL();
+	
+	current_process->setgid = gid;
+	return 0;
+}
+int sys_isatty(int fd)
+{
+	if(fd < 3)
+		return 1;
+	if(validate_fd(fd))
+		return errno = EBADF, -1;
+	ioctx_t *ioctx = &current_process->ctx;
+	if(ioctx->file_desc[fd]->vfs_node->type & VFS_TYPE_CHAR_DEVICE)
+		return 1;
+	else
+		return errno = ENOTTY, 0;
 }
 void *syscall_list[] =
 {
@@ -907,5 +935,8 @@ void *syscall_list[] =
 	[29] = (void*) sys_ioctl,
 	[30] = (void*) sys_truncate,
 	[31] = (void*) sys_ftruncate,
-	[32] = (void*) sys_personality
+	[32] = (void*) sys_personality,
+	[33] = (void*) sys_setuid,
+	[34] = (void*) sys_setgid,
+	[35] = (void*) sys_isatty
 };

@@ -45,8 +45,10 @@
 #define SYS_truncate	30
 #define SYS_ftruncate	31
 #define SYS_personality	32
-#define SYS_signal	33
-#define SYS_isatty	34
+#define SYS_setuid	33
+#define SYS_setgid	34
+#define SYS_signal	35
+#define SYS_isatty	36
 #define set_errno() register int __err asm("r11"); \
 errno = __err
 
@@ -70,5 +72,6 @@ errno = __err
 
 #define syscall(...) register unsigned long rax asm ("rax"); \
 MKFN(__syscall, ##__VA_ARGS__); \
+unsigned long ret = rax; \
 
 #endif

@@ -56,6 +56,7 @@ string/stpcpy.o \
 stdlib/_Exit.o \
 posix/io.o \
 posix/uio.o \
+posix/time.o \
 stdio/fprintf.o \
 stdio/fread.o \
 stdio/fwrite.o \
@@ -66,12 +67,16 @@ posix/process.o \
 posix/memory.o \
 posix/signal.o \
 stdio/perror.o \
-math/rand.o \
+stdlib/rand.o \
 libc/__tls_get_addr.o \
 stdio/ftell.o \
 stdio/fopen.o \
 stdio/fseek.o \
-stdio/rewind.o
+stdio/rewind.o \
+stdio/fgets.o \
+stdio/gets.o \
+stdio/fclose.o \
+stdio/tmpnam.o
 OBJS:=\
 $(FREEOBJS) \
 libc/init.o \
@@ -102,9 +107,9 @@ libc.so: $(OBJS)
 	mkdir -p $(DESTDIR)$(LIBDIR)
 	cp $@ $(DESTDIR)$(LIBDIR)
 ld-spartix.so: $(LD_SPARTIX_OBJS)
-	$(CC) $(LD_SPARTIX_OBJS) -Wl,-Bstatic -shared -lc $(CFLAGS) $(CPPFLAGS) -o $@
+	#$(CC) $(LD_SPARTIX_OBJS) -Wl,-Bstatic -shared -lc $(CFLAGS) $(CPPFLAGS) -o $@
 	mkdir -p $(DESTDIR)/lib
-	cp $@ $(DESTDIR)/lib
+	#cp $@ $(DESTDIR)/lib
 %.o: %.c
 	echo [CC] $<
 	$(CC) -c $< -o $@ -std=gnu11 -fPIC $(CFLAGS) $(CPPFLAGS)
