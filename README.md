@@ -1,3 +1,4 @@
+[![Stories in Ready](https://badge.waffle.io/heatd/Onyx.png?label=ready&title=Ready)](https://waffle.io/heatd/Onyx)
 #Onyx
 ## An x86_64 Operating system
 
